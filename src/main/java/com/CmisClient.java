@@ -3,8 +3,10 @@ package com;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Date;
@@ -33,11 +35,15 @@ import org.apache.chemistry.opencmis.commons.data.RepositoryCapabilities;
 import org.apache.chemistry.opencmis.commons.data.RepositoryInfo;
 import org.apache.chemistry.opencmis.commons.enums.Action;
 import org.apache.chemistry.opencmis.commons.enums.BindingType;
+import org.apache.chemistry.opencmis.commons.enums.CapabilityContentStreamUpdates;
 import org.apache.chemistry.opencmis.commons.enums.PropertyType;
+import org.apache.chemistry.opencmis.commons.enums.UnfileObject;
 import org.apache.chemistry.opencmis.commons.enums.VersioningState;
+import org.apache.chemistry.opencmis.commons.exceptions.CmisContentAlreadyExistsException;
 import org.apache.chemistry.opencmis.commons.exceptions.CmisObjectNotFoundException;
+import org.apache.chemistry.opencmis.commons.exceptions.CmisRuntimeException;
 import org.apache.chemistry.opencmis.commons.exceptions.CmisUnauthorizedException;
-import org.apache.chemistry.opencmis.commons.impl.IOUtils;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
@@ -64,11 +70,21 @@ public class CmisClient {
 		System.out
 				.println("******************createFolder***********************");
 
-		Folder folder = cmisClient.createFolder(session);
-		Document document = cmisClient
-				.createDocumentFromFileWithCustomType(session);
-		System.out.println(folder.getId());
-		System.out.println(document.getId());
+		// Folder folder = cmisClient.createFolder(session);
+		// Document document = cmisClient
+		// .createDocumentFromFileWithCustomType(session);
+		// System.out.println(folder.getId());
+		// System.out.println(document.getId());
+		System.out
+				.println("******************updateFolder***********************");
+		String path2Object = session.getRootFolder().getPath();
+		if (!path2Object.endsWith("/")) {
+			path2Object += "/";
+		}
+		path2Object += "new";
+		Folder folderToRename = (Folder) session.getObjectByPath(path2Object);
+		Folder updatedFolder = cmisClient.updateFolder(folderToRename);
+		System.out.println(updatedFolder.getName());
 	}
 
 	public Session getSession(String connectionName, String username,
@@ -394,5 +410,291 @@ public class CmisClient {
 					+ getDocumentPath(newDocument));
 		}
 		return newDocument;
+	}
+
+	public Folder updateFolder(Folder folder) {
+		String newFolderName = "OpenCM";
+		Folder updatedFolder = null;
+		// If we got a folder update the name of it
+		if (folder != null) {
+			// Make sure the user is allowed to update folder properties
+			if (folder.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_UPDATE_PROPERTIES) == false) {
+				throw new CmisUnauthorizedException(
+						"Current user does not have permission to update "
+								+ "folder properties for " + folder.getPath());
+			}
+			// Update the folder with a new name
+			String oldName = folder.getName();
+			Map<String, Object> newFolderProps = new HashMap<String, Object>();
+			newFolderProps.put(PropertyIds.NAME, newFolderName);
+			folder.updateProperties(newFolderProps, false);
+
+		} else {
+			logger.error("Folder to update is null!");
+		}
+		return folder;
+	}
+
+	public Document updateDocument(Session session, Document document)
+			throws IOException {
+		RepositoryInfo repoInfo = session.getRepositoryInfo();
+		if (!repoInfo.getCapabilities().getContentStreamUpdatesCapability()
+				.equals(CapabilityContentStreamUpdates.ANYTIME)) {
+			logger.warn("Updating content stream without a checkout is"
+					+ " not supported by this repository [repoName="
+					+ repoInfo.getProductName() + "][repoVersion="
+					+ repoInfo.getProductVersion() + "]");
+			return document;
+		}
+		// Make sure we got a document, then update it
+		Document updatedDocument = null;
+		if (document != null) {
+			// Make sure the user is allowed to update the content
+			// for this document
+			if (document.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_SET_CONTENT_STREAM) == false) {
+				throw new CmisUnauthorizedException("Current user does not"
+						+ " have permission to set/update content stream for "
+						+ getDocumentPath(document));
+			}
+			// Setup new document content
+			String newDocumentText = "This is a test document that has "
+					+ "been updated with new content!";
+			String mimetype = "text/plain; charset=UTF-8";
+			byte[] bytes = newDocumentText.getBytes("UTF-8");
+			ByteArrayInputStream input = new ByteArrayInputStream(bytes);
+			ContentStream contentStream = session.getObjectFactory()
+					.createContentStream(document.getName(), bytes.length,
+							mimetype, input);
+			boolean overwriteContent = true;
+			updatedDocument = document.setContentStream(contentStream,
+					overwriteContent);
+			if (updatedDocument == null) {
+				logger.info("No new version was created when "
+						+ "content stream was updated for "
+						+ getDocumentPath(document));
+				updatedDocument = document;
+			}
+			logger.info("Updated content for document: "
+					+ getDocumentPath(updatedDocument)
+					+ " [version="
+					+ updatedDocument.getVersionLabel()
+					+ "][modifier="
+					+ updatedDocument.getLastModifiedBy()
+					+ "][modified="
+					+ date2String(updatedDocument.getLastModificationDate()
+							.getTime()) + "]");
+		} else {
+			logger.info("Document is null, cannot update it!");
+		}
+		return updatedDocument;
+	}
+
+	public void deleteDocument(Document document) {
+		// If we got a document try and delete it
+		if (document != null) {
+			// Make sure the user is allowed to delete the document
+			if (document.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_DELETE_OBJECT) == false) {
+				throw new CmisUnauthorizedException("Current user does "
+						+ "not have permission to delete document "
+						+ document.getName() + " with Object ID "
+						+ document.getId());
+			}
+			String docPath = getDocumentPath(document);
+			boolean deleteAllVersions = true;
+			document.delete(deleteAllVersions);
+			logger.info("Deleted document: " + docPath);
+		} else {
+			logger.info("Cannot delete document as it is null!");
+		}
+	}
+
+	public void deleteFolder(Folder folder) {
+		// If we got a folder then delete
+		if (folder != null) {
+			// Make sure the user is allowed to delete the folder
+			if (folder.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_DELETE_OBJECT) == false) {
+				throw new CmisUnauthorizedException("Current user does "
+						+ "not have permission to delete folder "
+						+ folder.getPath());
+			}
+			String folderPath = folder.getPath();
+			folder.delete();
+			logger.info("Deleted folder: " + folderPath);
+		} else {
+			logger.info("Cannot delete folder that is null");
+		}
+	}
+
+	public void deleteFolderTree(Session session) {
+		UnfileObject unfileMode = UnfileObject.UNFILE;
+		RepositoryInfo repoInfo = session.getRepositoryInfo();
+		if (!repoInfo.getCapabilities().isUnfilingSupported()) {
+			logger.warn("The repository does not support unfiling"
+					+ " a document from a folder, documents will "
+					+ "be deleted completely from all associated folders "
+					+ "[repoName=" + repoInfo.getProductName()
+					+ "][repoVersion=" + repoInfo.getProductVersion() + "]");
+			unfileMode = UnfileObject.DELETE;
+		}
+		String folderName = "OpenCMISTestWithContent";
+		Folder parentFolder = session.getRootFolder();
+		// Check if folder exist, if not don't try and delete it
+		Folder someFolder = (Folder) getObject(session, parentFolder,
+				folderName);
+		if (someFolder != null) {
+			// Make sure the user is allowed to delete the folder
+			if (someFolder.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_DELETE_TREE) == false) {
+				throw new CmisUnauthorizedException("Current user does"
+						+ " not have permission to delete folder tree"
+						+ parentFolder.getPath());
+			}
+			boolean deleteAllVersions = true;
+			boolean continueOnFailure = true;
+			List<String> failedObjectIds = someFolder.deleteTree(
+					deleteAllVersions, unfileMode, continueOnFailure);
+			logger.info("Deleted folder and all its content: "
+					+ someFolder.getName());
+			if (failedObjectIds != null && failedObjectIds.size() > 1) {
+				for (String failedObjectId : failedObjectIds) {
+					logger.info("Could not delete Alfresco node with "
+							+ "Node Ref: " + failedObjectId);
+				}
+			}
+		} else {
+			logger.info("Did not delete folder as it does not exist: "
+					+ parentFolder.getPath() + folderName);
+		}
+	}
+
+	public void getContentForDocumentAndStoreInFile(Session session) {
+		// This is one of the out-of-the-box email templates in Alfresco
+		String documentPath = "/Data Dictionary/Email Templates/invite/invite-email.html.ftl";
+		// Get the document object by path so we can
+		// get to the content stream
+		Document templateDocument = (Document) session
+				.getObjectByPath(documentPath);
+		if (templateDocument != null) {
+			// Make sure the user is allowed to get the
+			// content stream (bytes) for the document
+			if (templateDocument.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_GET_CONTENT_STREAM) == false) {
+				throw new CmisUnauthorizedException(
+						"Current user does not have permission to get the"
+								+ " content stream for " + documentPath);
+			}
+			File file = null;
+			InputStream input = null;
+			OutputStream output = null;
+			try {
+				// Create the file on the local drive without any content
+				file = new File(templateDocument.getName());
+				if (!file.exists()) {
+					file.createNewFile();
+				}
+				// Get the object content stream and write to
+				// the new local file
+				input = templateDocument.getContentStream().getStream();
+				output = new FileOutputStream(file);
+
+				IOUtils.copy(input, output);
+				// Close streams and handle exceptions
+				input.close();
+				output.close();
+			} catch (IOException ioe) {
+				ioe.printStackTrace();
+			} finally {
+				IOUtils.closeQuietly(output);
+				IOUtils.closeQuietly(input);
+			}
+			logger.info("Created a new file " + file.getAbsolutePath()
+					+ " with content from document: " + documentPath);
+		} else {
+			logger.error("Template document could not be found: "
+					+ documentPath);
+		}
+	}
+
+	public void copyDocument(Session session, Document document) {
+		Folder parentFolder = session.getRootFolder();
+		String destinationFolderName = "Guest Home";
+		Folder destinationFolder = (Folder) getObject(session, parentFolder,
+				destinationFolderName);
+		if (destinationFolder == null) {
+			logger.error("Cannot copy " + document.getName()
+					+ ", could not find folder with the name "
+					+ destinationFolderName + ", are you using Alfresco?");
+			return;
+		}
+		// Check that we got the document, then copy
+		if (document != null) {
+			try {
+				document.copy(destinationFolder);
+				logger.info("Copied document " + document.getName()
+						+ " from folder " + parentFolder.getPath()
+						+ " to folder " + destinationFolder.getPath());
+			} catch (CmisContentAlreadyExistsException e) {
+				logger.error("Cannot copy document " + document.getName()
+						+ ", already exist in to folder "
+						+ destinationFolder.getPath());
+			}
+		} else {
+			logger.error("Document is null, cannot copy to "
+					+ destinationFolder.getPath());
+		}
+	}
+
+	public void copyFolder(Folder destinationFolder, Folder toCopyFolder) {
+		Map<String, Object> folderProperties = new HashMap<String, Object>();
+		folderProperties.put(PropertyIds.NAME, toCopyFolder.getName());
+		folderProperties.put(PropertyIds.OBJECT_TYPE_ID, toCopyFolder
+				.getBaseTypeId().value());
+		Folder newFolder = destinationFolder.createFolder(folderProperties);
+		copyChildren(newFolder, toCopyFolder);
+	}
+
+	public void copyChildren(Folder destinationFolder, Folder toCopyFolder) {
+		ItemIterable<CmisObject> immediateChildren = toCopyFolder.getChildren();
+		for (CmisObject child : immediateChildren) {
+			if (child instanceof Document) {
+				((Document) child).copy(destinationFolder);
+			} else if (child instanceof Folder) {
+				copyFolder(destinationFolder, (Folder) child);
+			}
+		}
+	}
+
+	public void moveDocument(Session session, Document document) {
+		Folder parentFolder = session.getRootFolder();
+		Folder sourceFolder = getDocumentParentFolder(document);
+		String destinationFolderName = "User Homes";
+		Folder destinationFolder = (Folder) getObject(session, parentFolder,
+				destinationFolderName);
+		// Check that we got the document, then move
+		if (document != null) {
+			// Make sure the user is allowed to move the document
+			// to a new folder
+			if (document.getAllowableActions().getAllowableActions()
+					.contains(Action.CAN_MOVE_OBJECT) == false) {
+				throw new CmisUnauthorizedException("Current user does"
+						+ " not have permission to move "
+						+ getDocumentPath(document) + document.getName());
+			}
+			String pathBeforeMove = getDocumentPath(document);
+			try {
+				document.move(sourceFolder, destinationFolder);
+				logger.info("Moved document " + pathBeforeMove + " to folder "
+						+ destinationFolder.getPath());
+			} catch (CmisRuntimeException e) {
+				logger.error("Cannot move document to folder "
+						+ destinationFolder.getPath() + ": " + e.getMessage());
+			}
+		} else {
+			logger.error("Document is null, cannot move!");
+		}
 	}
 }
